@@ -21,7 +21,7 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 if face_cascade.empty():
     raise Exception("Error loading Haar Cascade")
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
-BACKEND_URL = 'https://emotion-backend.onrender.com'  # Replace with Backend Render URL
+BACKEND_URL = 'https://emotion-backend-sh1h.onrender.com' 
 PING_INTERVAL = 300  # 5 minutes in seconds
 
 def ping_backend():
