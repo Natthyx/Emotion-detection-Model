@@ -22,8 +22,8 @@ if face_cascade.empty():
     raise Exception("Error loading Haar Cascade")
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 EMOTION_URL = 'https://emotion-backend-sh1h.onrender.com'
-BACKEND_URL = 'http://172.20.10.6:5001'
 PING_INTERVAL = 300
+latest_emotion = "Waiting for emotion..."
 
 def ping_emotion_server():
     while True:
@@ -37,25 +37,19 @@ def ping_emotion_server():
             print(f"Ping to emotion-detector error: {e}")
         time.sleep(PING_INTERVAL)
 
-def send_emotion_to_backend(emotion):
-    """Send the dominant emotion to the backend API."""
-    print(f"Attempting to send emotion '{emotion}' to backend: {BACKEND_URL}/emotion")
-    try:
-        response = requests.post(f'{BACKEND_URL}/emotion', json={'emotion': emotion}, timeout=10)
-        if response.status_code == 200:
-            print(f"Successfully sent emotion '{emotion}' to backend: {response.json()}")
-        else:
-            print(f"Failed to send emotion to backend: Status {response.status_code}, {response.text}")
-    except Exception as e:
-        print(f"Error sending emotion to backend: {e}")
-
 @app.get("/ping")
 async def ping():
     print("Received ping request")
     return JSONResponse(content={"status": "Emotion server is active"}, status_code=200)
 
+@app.get("/emotion")
+async def get_emotion():
+    print(f"Returning latest emotion: {latest_emotion}")
+    return JSONResponse(content={"emotion": latest_emotion}, status_code=200)
+
 @app.post("/predict")
 async def predict_emotion(frames: list[UploadFile] = File(...)):
+    global latest_emotion
     print(f"Received {len(frames)} frames for processing")
     emotion_counts = Counter()
     warnings = []
@@ -126,8 +120,9 @@ async def predict_emotion(frames: list[UploadFile] = File(...)):
         emotion = max(valid_emotions, key=lambda e: emotion_counts[e])
         print(f"Dominant emotion: {emotion}")
 
-    # Send emotion to backend
-    send_emotion_to_backend(emotion)
+    # Store the latest emotion
+    latest_emotion = emotion
+    print(f"Stored latest emotion: {latest_emotion}")
 
     # Include warnings in response
     response_content = {"emotion": emotion}
