@@ -21,60 +21,121 @@ face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_fronta
 if face_cascade.empty():
     raise Exception("Error loading Haar Cascade")
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
-BACKEND_URL = 'https://emotion-backend-sh1h.onrender.com' 
-PING_INTERVAL = 300  # 5 minutes in seconds
+EMOTION_URL = 'https://emotion-backend-sh1h.onrender.com'
+BACKEND_URL = 'http://172.20.10.6:5001'
+PING_INTERVAL = 300
 
-def ping_backend():
+def ping_emotion_server():
     while True:
         try:
-            response = requests.get(f'{BACKEND_URL}/ping')
+            response = requests.get(f'{EMOTION_URL}/ping')
             if response.status_code == 200:
-                print(f"Ping to backend successful: {response.json()}")
+                print(f"Ping to emotion-detector successful: {response.json()}")
             else:
-                print(f"Ping to backend failed: Status {response.status_code}")
+                print(f"Ping to emotion-detector failed: Status {response.status_code}")
         except Exception as e:
-            print(f"Ping to backend error: {e}")
+            print(f"Ping to emotion-detector error: {e}")
         time.sleep(PING_INTERVAL)
+
+def send_emotion_to_backend(emotion):
+    """Send the dominant emotion to the backend API."""
+    print(f"Attempting to send emotion '{emotion}' to backend: {BACKEND_URL}/emotion")
+    try:
+        response = requests.post(f'{BACKEND_URL}/emotion', json={'emotion': emotion}, timeout=10)
+        if response.status_code == 200:
+            print(f"Successfully sent emotion '{emotion}' to backend: {response.json()}")
+        else:
+            print(f"Failed to send emotion to backend: Status {response.status_code}, {response.text}")
+    except Exception as e:
+        print(f"Error sending emotion to backend: {e}")
 
 @app.get("/ping")
 async def ping():
+    print("Received ping request")
     return JSONResponse(content={"status": "Emotion server is active"}, status_code=200)
 
 @app.post("/predict")
 async def predict_emotion(frames: list[UploadFile] = File(...)):
+    print(f"Received {len(frames)} frames for processing")
     emotion_counts = Counter()
+    warnings = []
 
-    for frame in frames:
+    for i, frame in enumerate(frames):
+        print(f"Processing frame {i+1}/{len(frames)}: {frame.filename}")
         if not frame.content_type.startswith('image/'):
+            warnings.append(f"Skipped non-image file: {frame.filename}, type: {frame.content_type}")
+            print(f"Warning: {warnings[-1]}")
             continue
+        print("Reading frame contents")
         contents = await frame.read()
-        image = Image.open(BytesIO(contents)).convert('RGB')
-        img_array = np.array(image)
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
-        if len(faces) == 0:
-            emotion_counts['No face detected'] += 1
+        print(f"Read {len(contents)} bytes")
+        try:
+            print("Opening image with PIL")
+            image = Image.open(BytesIO(contents)).convert('RGB')
+            print("Converting image to NumPy array")
+            img_array = np.array(image)
+            print(f"Image shape: {img_array.shape}")
+            print("Converting to grayscale")
+            gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+            print("Detecting faces")
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
+            if len(faces) == 0:
+                emotion_counts['No face detected'] += 1
+                print("No faces detected in frame")
+                continue
+            print(f"Detected {len(faces)} face(s), using first face")
+            x, y, w, h = faces[0]
+            print(f"Face coordinates: x={x}, y={y}, w={w}, h={h}")
+            face_img = gray[y:y+h, x:x+w]
+            if face_img.size == 0:
+                emotion_counts['Invalid face region'] += 1
+                print("Invalid face region")
+                continue
+            print("Applying histogram equalization")
+            face_img = cv2.equalizeHist(face_img)
+            print("Resizing face to 48x48")
+            face_img = cv2.resize(face_img, (48, 48))
+            print("Normalizing pixel values")
+            face_img = face_img / 255.0
+            print("Adding batch and channel dimensions")
+            face_img = np.expand_dims(face_img, axis=0)
+            face_img = np.expand_dims(face_img, axis=-1).astype(np.float32)
+            print(f"Input tensor shape: {face_img.shape}")
+            print("Setting input tensor")
+            interpreter.set_tensor(input_details[0]['index'], face_img)
+            print("Running model inference")
+            interpreter.invoke()
+            print("Retrieving output tensor")
+            prediction = interpreter.get_tensor(output_details[0]['index'])
+            print(f"Prediction scores: {prediction}")
+            emotion = emotions[np.argmax(prediction)]
+            print(f"Predicted emotion: {emotion}")
+            emotion_counts[emotion] += 1
+        except Exception as e:
+            warnings.append(f"Error processing frame {frame.filename}: {str(e)}")
+            print(f"Warning: {warnings[-1]}")
             continue
-        x, y, w, h = faces[0]
-        face_img = gray[y:y+h, x:x+w]
-        if face_img.size == 0:
-            emotion_counts['Invalid face region'] += 1
-            continue
-        face_img = cv2.equalizeHist(face_img)
-        face_img = cv2.resize(face_img, (48, 48))
-        face_img = face_img / 255.0
-        face_img = np.expand_dims(face_img, axis=0)
-        face_img = np.expand_dims(face_img, axis=-1).astype(np.float32)
-        interpreter.set_tensor(input_details[0]['index'], face_img)
-        interpreter.invoke()
-        prediction = interpreter.get_tensor(output_details[0]['index'])
-        emotion = emotions[np.argmax(prediction)]
-        emotion_counts[emotion] += 1
 
+    print(f"Emotion counts: {dict(emotion_counts)}")
     valid_emotions = [e for e in emotion_counts if e in emotions]
+    print(f"Valid emotions: {valid_emotions}")
     if not valid_emotions:
-        return JSONResponse(content={"emotion": "No valid emotions detected"}, status_code=200)
-    most_common = max(valid_emotions, key=lambda e: emotion_counts[e])
-    return JSONResponse(content={"emotion": most_common}, status_code=200)
+        emotion = "No valid emotions detected"
+        print("No valid emotions detected")
+    else:
+        emotion = max(valid_emotions, key=lambda e: emotion_counts[e])
+        print(f"Dominant emotion: {emotion}")
 
-Thread(target=ping_backend, daemon=True).start()
+    # Send emotion to backend
+    send_emotion_to_backend(emotion)
+
+    # Include warnings in response
+    response_content = {"emotion": emotion}
+    if warnings:
+        response_content["warnings"] = warnings
+        print(f"Warnings: {warnings}")
+
+    print("Returning response")
+    return JSONResponse(content=response_content, status_code=200)
+
+Thread(target=ping_emotion_server, daemon=True).start()
