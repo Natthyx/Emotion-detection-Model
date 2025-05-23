@@ -12,17 +12,24 @@ import time
 from threading import Thread
 
 app = FastAPI()
+
 model_path = os.path.join(os.path.dirname(__file__), 'emotion_model.tflite')
 interpreter = tf.lite.Interpreter(model_path=model_path)
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
+
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 if face_cascade.empty():
     raise Exception("Error loading Haar Cascade")
+
 emotions = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
+special_emotions = ["No face detected", "Invalid face region"]
+all_possible_emotions = emotions + special_emotions
+
 EMOTION_URL = 'https://emotion-backend-sh1h.onrender.com'
 PING_INTERVAL = 300
+
 latest_emotion = "Waiting for emotion..."
 
 def ping_emotion_server():
@@ -60,59 +67,48 @@ async def predict_emotion(frames: list[UploadFile] = File(...)):
             warnings.append(f"Skipped non-image file: {frame.filename}, type: {frame.content_type}")
             print(f"Warning: {warnings[-1]}")
             continue
-        print("Reading frame contents")
+
         contents = await frame.read()
         print(f"Read {len(contents)} bytes")
         try:
-            print("Opening image with PIL")
             image = Image.open(BytesIO(contents)).convert('RGB')
-            print("Converting image to NumPy array")
             img_array = np.array(image)
-            print(f"Image shape: {img_array.shape}")
-            print("Converting to grayscale")
             gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            print("Detecting faces")
+
             faces = face_cascade.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(20, 20))
             if len(faces) == 0:
                 emotion_counts['No face detected'] += 1
                 print("No faces detected in frame")
                 continue
-            print(f"Detected {len(faces)} face(s), using first face")
+
             x, y, w, h = faces[0]
-            print(f"Face coordinates: x={x}, y={y}, w={w}, h={h}")
             face_img = gray[y:y+h, x:x+w]
             if face_img.size == 0:
                 emotion_counts['Invalid face region'] += 1
                 print("Invalid face region")
                 continue
-            print("Applying histogram equalization")
+
             face_img = cv2.equalizeHist(face_img)
-            print("Resizing face to 48x48")
             face_img = cv2.resize(face_img, (48, 48))
-            print("Normalizing pixel values")
             face_img = face_img / 255.0
-            print("Adding batch and channel dimensions")
             face_img = np.expand_dims(face_img, axis=0)
             face_img = np.expand_dims(face_img, axis=-1).astype(np.float32)
-            print(f"Input tensor shape: {face_img.shape}")
-            print("Setting input tensor")
+
             interpreter.set_tensor(input_details[0]['index'], face_img)
-            print("Running model inference")
             interpreter.invoke()
-            print("Retrieving output tensor")
             prediction = interpreter.get_tensor(output_details[0]['index'])
-            print(f"Prediction scores: {prediction}")
             emotion = emotions[np.argmax(prediction)]
-            print(f"Predicted emotion: {emotion}")
             emotion_counts[emotion] += 1
+            print(f"Predicted emotion: {emotion}")
         except Exception as e:
             warnings.append(f"Error processing frame {frame.filename}: {str(e)}")
             print(f"Warning: {warnings[-1]}")
             continue
 
     print(f"Emotion counts: {dict(emotion_counts)}")
-    valid_emotions = [e for e in emotion_counts if e in emotions]
-    print(f"Valid emotions: {valid_emotions}")
+
+    # Consider all possible emotions including special cases
+    valid_emotions = [e for e in emotion_counts if e in all_possible_emotions]
     if not valid_emotions:
         emotion = "No valid emotions detected"
         print("No valid emotions detected")
@@ -120,12 +116,10 @@ async def predict_emotion(frames: list[UploadFile] = File(...)):
         emotion = max(valid_emotions, key=lambda e: emotion_counts[e])
         print(f"Dominant emotion: {emotion}")
 
-    # Store the latest emotion
     latest_emotion = emotion
     print(f"Stored latest emotion: {latest_emotion}")
 
-    # Include warnings in response
-    response_content = {"emotion": emotion}
+    response_content = {"emotion": emotion, "counts": dict(emotion_counts)}
     if warnings:
         response_content["warnings"] = warnings
         print(f"Warnings: {warnings}")
